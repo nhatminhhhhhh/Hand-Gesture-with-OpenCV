@@ -163,7 +163,10 @@ def main():
             frame = draw_rect(frame)
 
         cv2.imshow("Live Feed", rescale_frame(frame))
-
+        
+        if is_hand_hist_created:
+            cv2.imshow("Hist mask image", rescale_frame(hist_masking(frame, hand_hist)))
+        
         if pressed_key == 27:
             break
 
