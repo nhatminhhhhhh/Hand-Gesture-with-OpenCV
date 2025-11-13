@@ -1,8 +1,6 @@
-
 import cv2
 import numpy as np
 import math
-
 
 hand_hist = None
 traverse_point = []
@@ -12,6 +10,10 @@ hand_rect_one_y = None
 
 hand_rect_two_x = None
 hand_rect_two_y = None
+
+# Global skin color range
+lower_skin = None
+upper_skin = None
 
 
 def rescale_frame(frame, wpercent=60, hpercent=60):
@@ -78,7 +80,7 @@ def draw_rect_V2(frame):
 
 def hand_histogram(frame):
     """Calculate HSV range from 9 green box samples (like commented code)"""
-    global hand_rect_one_x, hand_rect_one_y
+    global hand_rect_one_x, hand_rect_one_y, lower_skin, upper_skin
 
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     rect_size = 30
@@ -243,8 +245,32 @@ def validate_hand_contour(contour, frame):
     # All checks passed
     return True, "HAND DETECTED"
 
+def imageFiltering(frame, lower_skin, upper_skin):
+
+	#area of intereset(hand)
+	roi = frame.copy()
+
+	#applying gaussian blurr to reduce the noise
+	blur = cv2.GaussianBlur(roi,(5,5),0)
+	#converting from coloured to HSV
+	hsv = cv2.cvtColor(blur,cv2.COLOR_BGR2HSV)
+
+	#applying a mask which makes skin color white and others black
+	mask = cv2.inRange(hsv, lower_skin, upper_skin)
+
+	kernel = np.ones((5,5))
+	#reducing noise
+	filtered = cv2.GaussianBlur(mask,(3,3),0)
+	ret,thresh = cv2.threshold(filtered,127,255,0) #thesholding the image
+	thesh = cv2.GaussianBlur(thresh,(5,5),0) #reducing the noise
+	#finding contours in the image. Will be used later in complex hull algorithm
+	contours,hierarchy = cv2.findContours(thresh,cv2.RETR_TREE,cv2.CHAIN_APPROX_SIMPLE)
+
+	return roi, thresh, contours
+
+
 def main():
-    global hand_hist
+    global hand_hist, lower_skin, upper_skin
     is_hand_hist_created = False
     capture = cv2.VideoCapture(0)
 
@@ -316,13 +342,78 @@ def main():
             frame_copy = draw_rect_V2(frame_copy)  # Use V2 for cropped frame
 
         # cv2.imshow("Live Feed", rescale_frame(frame))
-        cv2.imshow("Live Feed", frame)
+        # cv2.imshow("Live Feed", frame)
         cv2.imshow("Cropped", frame_copy)
         
         if is_hand_hist_created:
-            cv2.imshow("Hist mask image", hist_masking(frame_copy_clean, hand_hist))
+            cv2.imshow("Hist mask image",hist_masking(frame_copy_clean, hand_hist))
+            roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin) #getting the filtered image
+
+            #blank image which will be used to show the contours and defects
+            drawing = np.zeros(roi.shape,np.uint8)
+                    # === FINGER DETECTION WITH AREA FILTER ===
+            try:
+                # Find contour with max area
+                contour = max(contours, key=lambda x: cv2.contourArea(x), default=0)
+                
+                # Convex hull
+                hull = cv2.convexHull(contour)
+                
+                # Calculate hull area
+                current_hull_area = cv2.contourArea(hull)
+                
+                
+                # Within range or not calibrated yet - proceed with detection
+                # Draw contours
+                cv2.drawContours(drawing, [contour], -1, (0, 255, 0), 0)
+                cv2.drawContours(drawing, [hull], -1, (0, 0, 255), 0)
+                
+                # Display current area
+                cv2.putText(drawing, f"Area: {int(current_hull_area)}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                
+                # Finding defects in the convex polygon
+                hull = cv2.convexHull(contour, returnPoints=False)
+                defects = cv2.convexityDefects(contour, hull)
+                
+                count_defects = 0
+                
+                if defects is not None:
+                    for i in range(defects.shape[0]):
+                        s, e, f, d = defects[i, 0]
+                        start = tuple(contour[s][0])
+                        end = tuple(contour[e][0])
+                        far = tuple(contour[f][0])
+                        
+                        # Calculate angle
+                        a = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
+                        b = math.sqrt((far[0] - start[0]) ** 2 + (far[1] - start[1]) ** 2)
+                        c = math.sqrt((end[0] - far[0]) ** 2 + (end[1] - far[1]) ** 2)
+                        angle = (math.acos((b ** 2 + c ** 2 - a ** 2) / (2 * b * c)) * 180) / 3.14
+                        
+                        # Filter by angle (between fingers should be < 90 degrees)
+                        if angle <= 90:
+                            count_defects += 1
+                            cv2.circle(drawing, far, 5, [0, 0, 255], -1)
+                        
+                        cv2.line(drawing, start, end, [0, 255, 0], 2)
+                
+                # Display finger count
+                if count_defects == 0:
+                    cv2.putText(frame, "ONE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
+                elif count_defects == 1:
+                    cv2.putText(frame, "TWO", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
+                elif count_defects == 2:
+                    cv2.putText(frame, "THREE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
+                elif count_defects == 3:
+                    cv2.putText(frame, "FOUR", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
+                elif count_defects == 4:
+                    cv2.putText(frame, "FIVE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
             
-        
+            except Exception as e:
+                pass
+            cv2.imshow("thresh",thresh)
+            cv2.imshow("drawing",drawing)
         if pressed_key == 27:
             break
 
