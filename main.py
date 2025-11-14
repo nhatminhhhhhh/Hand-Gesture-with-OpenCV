@@ -78,7 +78,7 @@ def draw_rect_V2(frame):
 
 
 
-def hand_histogram(frame):
+def hand_hsv_func(frame):
     """Calculate HSV range from 9 green box samples (like commented code)"""
     global hand_rect_one_x, hand_rect_one_y, lower_skin, upper_skin
 
@@ -172,8 +172,8 @@ def contours(hist_mask_image):
     cont, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     return cont
 
-def manage_image_opr(frame, hand_hist):
-    hist_mask_image = hist_masking(frame, hand_hist)
+def manage_image_opr(frame, hand_hsv):
+    hist_mask_image = hist_masking(frame, hand_hsv)
 
     hist_mask_image = cv2.erode(hist_mask_image, None, iterations=2)
     hist_mask_image = cv2.dilate(hist_mask_image, None, iterations=2)
@@ -232,7 +232,7 @@ def validate_hand_contour(contour, frame):
         return False, "NO HAND: Wrong shape"
     
     # 4. Position check - more relaxed (allow closer to edges)
-    if x < 5 or x + w > frame_width - 5:
+    if x < 5 or x + w > frame_width - 2:
         return False, "NO HAND: Edge position"
     
     # 5. Centroid should be in reasonable vertical area (relaxed)
@@ -272,8 +272,8 @@ def imageFiltering(frame, lower_skin, upper_skin):
 
 
 def main():
-    global hand_hist, lower_skin, upper_skin
-    is_hand_hist_created = False
+    global hand_hsv, lower_skin, upper_skin
+    is_hand_created = False
     capture = cv2.VideoCapture(0)
 
     while capture.isOpened():
@@ -285,12 +285,12 @@ def main():
         frame_copy = crop_center(frame_copy)
 
         if pressed_key & 0xFF == ord('z'):
-            is_hand_hist_created = True
-            hand_hist = hand_histogram(frame_copy)
+            is_hand_created = True
+            hand_hsv = hand_hsv_func(frame_copy)
         
         if pressed_key & 0xFF == ord('r'):
-            is_hand_hist_created = False
-            hand_hist = None
+            is_hand_created = False
+            hand_hsv = None
             lower_skin = None
             upper_skin = None
             print("Recalibration mode - Press 'z' to calibrate skin color")
@@ -310,11 +310,11 @@ def main():
         cv2.putText(frame_copy, "TARGET", (center_x - 30, center_y - 15), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
         
-        if is_hand_hist_created:
+        if is_hand_created:
             # Create clean frame for mask (without text overlays)
             frame_copy_clean = crop_center(frame.copy())
             
-            hand_centroid_cropped, is_hand = manage_image_opr(frame_copy, hand_hist)
+            hand_centroid_cropped, is_hand = manage_image_opr(frame_copy, hand_hsv)
             
             # Calculate distance if hand is detected
             if hand_centroid_cropped is not None and is_hand:
@@ -346,6 +346,125 @@ def main():
                 center_x_full = center_x
                 center_y_full = center_y + 100
                 cv2.circle(frame, (center_x_full, center_y_full), 8, [0, 0, 255], -1)
+                # cv2.imshow("Hist mask image",hist_masking(frame_copy_clean, hand_hsv_func))
+                roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin) #getting the filtered image
+
+                #blank image which will be used to show the contours and defects
+                drawing = np.zeros(roi.shape,np.uint8)
+                
+                # Draw white centroid point on drawing window if hand detected
+                if hand_centroid_cropped is not None and is_hand:
+                    cv2.circle(drawing, hand_centroid_cropped, 5, [255, 255, 255], -1)
+                        # === FINGER DETECTION WITH AREA FILTER ===
+                    try:
+                        # Find contour with max area
+                        contour = max(contours, key=lambda x: cv2.contourArea(x), default=0)
+                        
+                        # Convex hull
+                        hull = cv2.convexHull(contour)
+                        
+                        # Calculate hull area
+                        current_hull_area = cv2.contourArea(hull)
+                        # Calculate area ratio
+                        contour_area = cv2.contourArea(contour)
+                        area_ratio = (contour_area / current_hull_area * 100) if current_hull_area > 0 else 0
+                        
+                        # Find the highest point (minimum Y value) of the contour
+                        highest_point = tuple(contour[contour[:, :, 1].argmin()][0])
+                        
+                        # Calculate distance from highest point to centroid (white point)
+                        highest_point_distance = 0
+                        # if hand_centroid_cropped is not None:
+                        highest_point_distance = math.sqrt(
+                            (highest_point[0] - hand_centroid_cropped[0]) ** 2 + 
+                            (highest_point[1] - hand_centroid_cropped[1]) ** 2
+                        )
+                            # Draw the highest point for visualization
+                        cv2.circle(drawing, highest_point, 5, [0, 255, 255], -1)  # Yellow dot
+                            # cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)  # Cyan line
+                        
+                        # Within range or not calibrated yet - proceed with detection
+                        # Draw contours
+                        cv2.drawContours(drawing, [contour], -1, (0, 255, 0), 0)
+                        # cv2.drawContours(drawing, [hull], -1, (255, 255, 255), 0)
+                        
+                        # Display current area
+                        cv2.putText(drawing, f"Area: {int(current_hull_area)}", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                        cv2.putText(drawing, f"Ratio: {area_ratio:.1f}%", (10, 50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                        cv2.putText(drawing, f"HighDist: {int(highest_point_distance)}", (10, 70),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
+                        
+                        # Finding defects in the convex polygon
+                        hull = cv2.convexHull(contour, returnPoints=False)
+                        defects = cv2.convexityDefects(contour, hull)
+                        
+                        count_defects = 0
+                        
+                        if defects is not None:
+                            for i in range(defects.shape[0]):
+                                s, e, f, d = defects[i, 0]
+                                start = tuple(contour[s][0])
+                                end = tuple(contour[e][0])
+                                far = tuple(contour[f][0])
+                                
+                                # Calculate angle
+                                a = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
+                                b = math.sqrt((far[0] - start[0]) ** 2 + (far[1] - start[1]) ** 2)
+                                c = math.sqrt((end[0] - far[0]) ** 2 + (end[1] - far[1]) ** 2)
+                                angle = (math.acos((b ** 2 + c ** 2 - a ** 2) / (2 * b * c)) * 180) / 3.14
+                                
+                                # Calculate distance from centroid to start and end points
+                                dist_to_start = math.sqrt((hand_centroid_cropped[0] - start[0]) ** 2 + 
+                                                        (hand_centroid_cropped[1] - start[1]) ** 2)
+                                dist_to_end = math.sqrt((hand_centroid_cropped[0] - end[0]) ** 2 + 
+                                                    (hand_centroid_cropped[1] - end[1]) ** 2)
+                                
+                                # Calculate Y difference (negative means fingertip is ABOVE centroid)
+                                y_diff_start = start[1] - hand_centroid_cropped[1]
+                                y_diff_end = end[1] - hand_centroid_cropped[1]
+                                
+                                # Valid finger detection criteria
+                                min_fingertip_distance = 40
+                                    
+                                if (angle >= 25 and angle <= 80 and d > 10000 and 
+                                    dist_to_start > min_fingertip_distance and dist_to_end > min_fingertip_distance and
+                                    y_diff_start < 0 and y_diff_end < 0):
+                                    count_defects += 1
+                                    # Draw defect visualization
+                                    cv2.circle(drawing, far, 5, [0, 0, 255], -1)  # Red circle at valley point
+                                    cv2.line(drawing, hand_centroid_cropped, start, [0, 255, 255], 1)  # Cyan line to start
+                                    cv2.line(drawing, hand_centroid_cropped, end, [0, 255, 255], 1)  # Cyan line to end
+                                
+                                cv2.line(drawing, start, end, [0, 100, 0], 2)
+                        
+                        # Distinguish FIST from ONE finger using highest point distance (AFTER loop)
+                        if count_defects == 0:
+                            # ONE finger: highest point is far from centroid (extended finger)
+                            # FIST: highest point is close to centroid (no extended finger)
+                            min_one_finger_distance = 125
+                            
+                            if highest_point_distance > min_one_finger_distance:
+                                # Highest point far from centroid = ONE finger extended
+                                cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)
+                                print("One finger detected - Distance:", highest_point_distance)
+                            else:
+                                # Highest point close to centroid = FIST
+                                print("FIST detected - Distance:", highest_point_distance)
+                        elif count_defects == 1:
+                            print("Two fingers detected")
+                        elif count_defects == 2:
+                            print("Three fingers detected")
+                        elif count_defects == 3:
+                            print("Four fingers detected")
+                        elif count_defects == 4:
+                            print("Five fingers detected")
+                            
+                    except Exception as e:
+                        pass
+                cv2.imshow("thresh",thresh)
+                cv2.imshow("drawing",drawing)
 
         else:
             frame_copy = rescale_frame(draw_rect_V2(frame_copy))  # Use V2 for cropped frame
@@ -356,144 +475,6 @@ def main():
         # cv2.imshow("Live Feed", rescale_frame(frame))
         # cv2.imshow("Live Feed", frame)
         cv2.imshow("Cropped", frame_copy)
-        
-        if is_hand_hist_created:
-            # cv2.imshow("Hist mask image",hist_masking(frame_copy_clean, hand_hist))
-            roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin) #getting the filtered image
-
-            #blank image which will be used to show the contours and defects
-            drawing = np.zeros(roi.shape,np.uint8)
-            
-            # Draw white centroid point on drawing window if hand detected
-            if hand_centroid_cropped is not None and is_hand:
-                cv2.circle(drawing, hand_centroid_cropped, 5, [255, 255, 255], -1)
-                    # === FINGER DETECTION WITH AREA FILTER ===
-            try:
-                # Find contour with max area
-                contour = max(contours, key=lambda x: cv2.contourArea(x), default=0)
-                
-                # Convex hull
-                hull = cv2.convexHull(contour)
-                
-                # Calculate hull area
-                current_hull_area = cv2.contourArea(hull)
-                # Calculate area ratio
-                contour_area = cv2.contourArea(contour)
-                area_ratio = (contour_area / current_hull_area * 100) if current_hull_area > 0 else 0
-                
-                # Find the highest point (minimum Y value) of the contour
-                highest_point = tuple(contour[contour[:, :, 1].argmin()][0])
-                
-                # Calculate distance from highest point to centroid (white point)
-                highest_point_distance = 0
-                if hand_centroid_cropped is not None:
-                    highest_point_distance = math.sqrt(
-                        (highest_point[0] - hand_centroid_cropped[0]) ** 2 + 
-                        (highest_point[1] - hand_centroid_cropped[1]) ** 2
-                    )
-                    # Draw the highest point for visualization
-                    cv2.circle(drawing, highest_point, 5, [0, 255, 255], -1)  # Yellow dot
-                    cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)  # Cyan line
-                
-                # Within range or not calibrated yet - proceed with detection
-                # Draw contours
-                cv2.drawContours(drawing, [contour], -1, (0, 255, 0), 0)
-                # cv2.drawContours(drawing, [hull], -1, (255, 255, 255), 0)
-                
-                # Display current area
-                cv2.putText(drawing, f"Area: {int(current_hull_area)}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
-                cv2.putText(drawing, f"Ratio: {area_ratio:.1f}%", (10, 50),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
-                cv2.putText(drawing, f"HighDist: {int(highest_point_distance)}", (10, 70),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 1)
-                
-                # Finding defects in the convex polygon
-                hull = cv2.convexHull(contour, returnPoints=False)
-                defects = cv2.convexityDefects(contour, hull)
-                
-                count_defects = 0
-                
-                if defects is not None:
-                    for i in range(defects.shape[0]):
-                        s, e, f, d = defects[i, 0]
-                        start = tuple(contour[s][0])
-                        end = tuple(contour[e][0])
-                        far = tuple(contour[f][0])
-                        
-                        # Calculate angle
-                        a = math.sqrt((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2)
-                        b = math.sqrt((far[0] - start[0]) ** 2 + (far[1] - start[1]) ** 2)
-                        c = math.sqrt((end[0] - far[0]) ** 2 + (end[1] - far[1]) ** 2)
-                        angle = (math.acos((b ** 2 + c ** 2 - a ** 2) / (2 * b * c)) * 180) / 3.14
-                        
-                        # Calculate distance from centroid (white point) to start and end points
-                        if hand_centroid_cropped is not None:
-                            dist_to_start = math.sqrt((hand_centroid_cropped[0] - start[0]) ** 2 + 
-                                                     (hand_centroid_cropped[1] - start[1]) ** 2)
-                            dist_to_end = math.sqrt((hand_centroid_cropped[0] - end[0]) ** 2 + 
-                                                   (hand_centroid_cropped[1] - end[1]) ** 2)
-                            
-                            # Calculate Y difference (negative means fingertip is ABOVE centroid, which is correct)
-                            # In OpenCV, Y increases downward, so fingertips should have smaller Y than centroid
-                            y_diff_start = start[1] - hand_centroid_cropped[1]  # negative = above centroid
-                            y_diff_end = end[1] - hand_centroid_cropped[1]      # negative = above centroid
-                            
-                            # Valid finger detection criteria:
-                            # 1. Angle between 25-80 degrees
-                            # 2. Defect depth > 10000
-                            # 3. Start and End points should be far from centroid (fingertips are far from palm center)
-                            # 4. Start and End points should be ABOVE centroid (negative Y difference, avoid wrist noise)
-                            min_fingertip_distance = 40  # Minimum distance from centroid to fingertip
-                            
-                            if (angle >= 25 and angle <= 80 and d > 10000 and 
-                                dist_to_start > min_fingertip_distance and dist_to_end > min_fingertip_distance and
-                                y_diff_start < 0 and y_diff_end < 0):  # Both fingertips must be above centroid
-                                count_defects += 1
-                                cv2.circle(drawing, far, 5, [255, 0, 255], -1)
-                                # Draw lines from centroid to start/end to visualize distance
-                                cv2.line(drawing, hand_centroid_cropped, start, [0, 255, 255], 1)
-                                cv2.line(drawing, hand_centroid_cropped, end, [0, 255, 255], 1)
-                        else:
-                            # Fallback if no centroid
-                            if angle >= 25 and angle <= 80 and d > 10000:
-                                count_defects += 1
-                                cv2.circle(drawing, far, 5, [255, 0, 255], -1)
-                        
-                        cv2.line(drawing, start, end, [0, 100, 0], 2)
-                
-                        # Distinguish FIST from ONE finger using highest point distance
-                        # Display finger count
-                        if count_defects == 0:
-                            # ONE finger: highest point is far from centroid (extended finger)
-                            # FIST: highest point is close to centroid (no extended finger)
-                            min_one_finger_distance = 125  # Threshold: if highest point > 80px from centroid = ONE finger
-                            
-                            if highest_point_distance > min_one_finger_distance:
-                                # Highest point far from centroid = ONE finger extended
-                                cv2.putText(frame_copy, "ONE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                                print("One finger detected - Distance:", highest_point_distance)
-                            else:
-                                # Highest point close to centroid = FIST
-                                cv2.putText(frame_copy, "FIST", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                                print("FIST detected - Distance:", highest_point_distance)
-                        elif count_defects == 1:
-                            # cv2.putText(frame_copy, "TWO", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                            print("Two fingers detected")
-                        elif count_defects == 2:
-                            # cv2.putText(frame_copy, "THREE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                            print("Three fingers detected")
-                        elif count_defects == 3:
-                            # cv2.putText(frame_copy, "FOUR", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                            print("Four fingers detected")
-                        elif count_defects == 4:
-                            # cv2.putText(frame_copy, "FIVE", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 2)
-                            print("Five fingers detected")
-                    
-            except Exception as e:
-                pass
-            cv2.imshow("thresh",thresh)
-            cv2.imshow("drawing",drawing)
         
         if pressed_key == 27:
             break
