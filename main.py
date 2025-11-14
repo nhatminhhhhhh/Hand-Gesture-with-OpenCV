@@ -2,9 +2,49 @@ import cv2
 import numpy as np
 import math
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+CONFIG = {
+    # Frame cropping (Y_start, Y_end, X_start, X_end)
+    'CROP_REGION': (100, 500, 0, 400),
+    
+    # Skin color calibration
+    'CALIBRATION_BOXES': 9,
+    'BOX_SIZE': 30,
+    'HSV_OFFSETS': {
+        'H_LOW': 15, 'H_HIGH': 15,
+        'S_LOW': 50, 'S_HIGH': 80,
+        'V_LOW': 60, 'V_HIGH': 80
+    },
+    
+    # Hand validation thresholds
+    'MIN_HAND_AREA': 1000,
+    'MAX_HAND_AREA_RATIO': 0.8,  # Fraction of frame
+    'MIN_ASPECT_RATIO': 0.5,
+    'EDGE_MARGIN': 5,
+    'MIN_CENTROID_HEIGHT_RATIO': 0.1,
+    
+    # Finger detection thresholds
+    'ANGLE_RANGE': (25, 80),  # Degrees for valid finger valley
+    'DEFECT_DEPTH_THRESHOLD': 10000,  # Minimum depth for valley
+    'MIN_FINGERTIP_DIST': 70,  # Min distance from centroid to fingertip
+    'MIN_ONE_FINGER_DIST': 150,  # Min distance for ONE finger detection
+    
+    # Morphological operations
+    'MORPH_KERNEL_SIZE': (4, 4),
+    'MORPH_ITERATIONS': 2,
+    
+    # Display settings
+    'RESCALE_PERCENT': 130
+}
+
+# ============================================================================
+# GLOBAL VARIABLES
+# ============================================================================
 hand_hist = None
 traverse_point = []
-total_rectangle = 9
+total_rectangle = CONFIG['CALIBRATION_BOXES']
 hand_rect_one_x = None
 hand_rect_one_y = None
 
@@ -16,15 +56,20 @@ lower_skin = None
 upper_skin = None
 
 
-def rescale_frame(frame, wpercent=130, hpercent=130):
+def rescale_frame(frame, wpercent=None, hpercent=None):
+    """Rescale frame for display"""
+    if wpercent is None:
+        wpercent = CONFIG['RESCALE_PERCENT']
+    if hpercent is None:
+        hpercent = CONFIG['RESCALE_PERCENT']
     width = int(frame.shape[1] * wpercent / 100)
     height = int(frame.shape[0] * hpercent / 100)
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
 def crop_center(frame):
-    
-    # Cắt bên trái (1/2 khung hình)
-    cropped = frame[100:500, 0:400]
+    """Crop frame to region of interest"""
+    y1, y2, x1, x2 = CONFIG['CROP_REGION']
+    cropped = frame[y1:y2, x1:x2]
     return cropped
  
 def draw_rect(frame):
@@ -51,12 +96,11 @@ def draw_rect(frame):
 
 
 def draw_rect_V2(frame):
-    """Draw larger rectangles suitable for cropped frame (300x600)"""
+    """Draw calibration rectangles on frame"""
     rows, cols, _ = frame.shape
     global total_rectangle, hand_rect_one_x, hand_rect_one_y, hand_rect_two_x, hand_rect_two_y
 
-    # Larger rectangles (30x30 instead of 10x10)
-    rect_size = 30
+    rect_size = CONFIG['BOX_SIZE']
     
     hand_rect_one_x = np.array(
         [6 * rows / 20, 6 * rows / 20, 6 * rows / 20, 9 * rows / 20, 9 * rows / 20, 9 * rows / 20, 12 * rows / 20,
@@ -79,11 +123,11 @@ def draw_rect_V2(frame):
 
 
 def hand_hsv_func(frame):
-    """Calculate HSV range from 9 green box samples (like commented code)"""
+    """Calculate HSV range from calibration box samples"""
     global hand_rect_one_x, hand_rect_one_y, lower_skin, upper_skin
 
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    rect_size = 30
+    rect_size = CONFIG['BOX_SIZE']
     
     h_values = []
     s_values = []
@@ -104,13 +148,13 @@ def hand_hsv_func(frame):
     s_mean = np.mean(s_values)
     v_mean = np.mean(v_values)
     
-    # More conservative offset values for better accuracy
-    h_offset_low = 15
-    h_offset_high = 15
-    s_offset_low = 50
-    s_offset_high = 80
-    v_offset_low = 60
-    v_offset_high = 80
+    # Get offset values from config
+    h_offset_low = CONFIG['HSV_OFFSETS']['H_LOW']
+    h_offset_high = CONFIG['HSV_OFFSETS']['H_HIGH']
+    s_offset_low = CONFIG['HSV_OFFSETS']['S_LOW']
+    s_offset_high = CONFIG['HSV_OFFSETS']['S_HIGH']
+    v_offset_low = CONFIG['HSV_OFFSETS']['V_LOW']
+    v_offset_high = CONFIG['HSV_OFFSETS']['V_HIGH']
     
     # Create HSV range with individual offsets per channel
     lower_skin = np.array([
@@ -220,26 +264,26 @@ def validate_hand_contour(contour, frame):
     
     # Validation checks
     # 1. Minimum area (filter out noise)
-    if area < 1000:
+    if area < CONFIG['MIN_HAND_AREA']:
         return False, "NO HAND: Too small"
     
     # 2. Maximum area (filter out full-frame detection)
-    if area > (frame_width * frame_height * 0.8):
+    if area > (frame_width * frame_height * CONFIG['MAX_HAND_AREA_RATIO']):
         return False, "NO HAND: Too large"
     
-    # 3. Aspect ratio - hand should be somewhat vertical (relaxed constraint)
-    if aspect_ratio < 0.5:
+    # 3. Aspect ratio - hand should be somewhat vertical
+    if aspect_ratio < CONFIG['MIN_ASPECT_RATIO']:
         return False, "NO HAND: Wrong shape"
     
-    # 4. Position check - more relaxed (allow closer to edges)
-    if x < 5 or x + w > frame_width - 2:
+    # 4. Position check (allow some margin from edges)
+    if x < CONFIG['EDGE_MARGIN'] or x + w > frame_width - CONFIG['EDGE_MARGIN']:
         return False, "NO HAND: Edge position"
     
-    # 5. Centroid should be in reasonable vertical area (relaxed)
+    # 5. Centroid should be in reasonable vertical area
     M = cv2.moments(contour)
     if M["m00"] != 0:
         cy = int(M["m01"] / M["m00"])
-        if cy < frame_height * 0.1:
+        if cy < frame_height * CONFIG['MIN_CENTROID_HEIGHT_RATIO']:
             return False, "NO HAND: Too high"
     
     # All checks passed
@@ -263,8 +307,8 @@ def imageFiltering(frame, lower_skin, upper_skin):
     filtered = cv2.GaussianBlur(mask, (3, 3), 0)
     ret, thresh = cv2.threshold(filtered, 127, 255, 0)  # thresholding the image
     thresh = cv2.GaussianBlur(thresh, (5,5), 0) # reducing the noise
-    kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (4, 4))
-    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel2, iterations=2)
+    kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, CONFIG['MORPH_KERNEL_SIZE'])
+    thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel2, iterations=CONFIG['MORPH_ITERATIONS'])
     # finding contours in the image. Will be used later in complex hull algorithm
     contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
@@ -426,9 +470,10 @@ def main():
                                 y_diff_end = end[1] - hand_centroid_cropped[1]
                                 
                                 # Valid finger detection criteria
-                                min_fingertip_distance = 70
+                                min_fingertip_distance = CONFIG['MIN_FINGERTIP_DIST']
+                                angle_min, angle_max = CONFIG['ANGLE_RANGE']
                                     
-                                if (angle >= 25 and angle <= 80 and d > 10000 and 
+                                if (angle >= angle_min and angle <= angle_max and d > CONFIG['DEFECT_DEPTH_THRESHOLD'] and 
                                     dist_to_start > min_fingertip_distance and dist_to_end > min_fingertip_distance and
                                     y_diff_start < 0 and y_diff_end < 0):
                                     count_defects += 1
@@ -441,7 +486,7 @@ def main():
                         
                         # Distinguish FIST from real fingers using highest point distance
                         # This helps avoid false positives from shadows/gaps in FIST
-                        min_one_finger_distance = 150
+                        min_one_finger_distance = CONFIG['MIN_ONE_FINGER_DIST']
                         
                         if count_defects == 0:
                             # No defects detected
