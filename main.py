@@ -24,7 +24,7 @@ def rescale_frame(frame, wpercent=130, hpercent=130):
 def crop_center(frame):
     
     # Cắt bên trái (1/2 khung hình)
-    cropped = frame[100:500, 0:300]
+    cropped = frame[100:500, 0:400]
     return cropped
  
 def draw_rect(frame):
@@ -279,7 +279,7 @@ def main():
     while capture.isOpened():
         pressed_key = cv2.waitKey(1)
         _, frame = capture.read()
-        height, width = frame.shape[:2]
+        # height, width = frame.shape[:2]
         frame = cv2.flip(frame, 1)
         frame_copy = frame.copy()
         frame_copy = crop_center(frame_copy)
@@ -426,7 +426,7 @@ def main():
                                 y_diff_end = end[1] - hand_centroid_cropped[1]
                                 
                                 # Valid finger detection criteria
-                                min_fingertip_distance = 40
+                                min_fingertip_distance = 70
                                     
                                 if (angle >= 25 and angle <= 80 and d > 10000 and 
                                     dist_to_start > min_fingertip_distance and dist_to_end > min_fingertip_distance and
@@ -439,12 +439,12 @@ def main():
                                 
                                 cv2.line(drawing, start, end, [0, 100, 0], 2)
                         
-                        # Distinguish FIST from ONE finger using highest point distance (AFTER loop)
+                        # Distinguish FIST from real fingers using highest point distance
+                        # This helps avoid false positives from shadows/gaps in FIST
+                        min_one_finger_distance = 150
+                        
                         if count_defects == 0:
-                            # ONE finger: highest point is far from centroid (extended finger)
-                            # FIST: highest point is close to centroid (no extended finger)
-                            min_one_finger_distance = 125
-                            
+                            # No defects detected
                             if highest_point_distance > min_one_finger_distance:
                                 # Highest point far from centroid = ONE finger extended
                                 cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)
@@ -452,14 +452,23 @@ def main():
                             else:
                                 # Highest point close to centroid = FIST
                                 print("FIST detected - Distance:", highest_point_distance)
-                        elif count_defects == 1:
-                            print("Two fingers detected")
-                        elif count_defects == 2:
-                            print("Three fingers detected")
-                        elif count_defects == 3:
-                            print("Four fingers detected")
-                        elif count_defects == 4:
-                            print("Five fingers detected")
+                        
+                        elif count_defects >= 1:
+                            # Defects detected - check if it's real fingers or just shadow noise
+                            if highest_point_distance < min_one_finger_distance:
+                                # Highest point is close to centroid = FIST with shadow artifacts
+                                # Ignore the defects - it's actually a FIST
+                                print(f"FIST detected (shadow defects ignored) - HighDist: {highest_point_distance}, Defects: {count_defects}")
+                            else:
+                                # Highest point is far = real extended fingers
+                                if count_defects == 1:
+                                    print("Two fingers detected")
+                                elif count_defects == 2:
+                                    print("Three fingers detected")
+                                elif count_defects == 3:
+                                    print("Four fingers detected")
+                                elif count_defects == 4:
+                                    print("Five fingers detected")
                             
                     except Exception as e:
                         pass
