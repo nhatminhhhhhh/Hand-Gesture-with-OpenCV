@@ -42,12 +42,9 @@ CONFIG = {
 # ============================================================================
 # GLOBAL VARIABLES
 # ============================================================================
-hand_hist = None
-traverse_point = []
 total_rectangle = CONFIG['CALIBRATION_BOXES']
 hand_rect_one_x = None
 hand_rect_one_y = None
-
 hand_rect_two_x = None
 hand_rect_two_y = None
 
@@ -71,29 +68,6 @@ def crop_center(frame):
     y1, y2, x1, x2 = CONFIG['CROP_REGION']
     cropped = frame[y1:y2, x1:x2]
     return cropped
- 
-def draw_rect(frame):
-    rows, cols, _ = frame.shape
-    global total_rectangle, hand_rect_one_x, hand_rect_one_y, hand_rect_two_x, hand_rect_two_y
-
-    hand_rect_one_x = np.array(
-        [6 * rows / 20, 6 * rows / 20, 6 * rows / 20, 9 * rows / 20, 9 * rows / 20, 9 * rows / 20, 12 * rows / 20,
-         12 * rows / 20, 12 * rows / 20], dtype=np.uint32)
-
-    hand_rect_one_y = np.array(
-        [9 * cols / 20, 10 * cols / 20, 11 * cols / 20, 9 * cols / 20, 10 * cols / 20, 11 * cols / 20, 9 * cols / 20,
-         10 * cols / 20, 11 * cols / 20], dtype=np.uint32)
-
-    hand_rect_two_x = hand_rect_one_x + 10
-    hand_rect_two_y = hand_rect_one_y + 10
-
-    for i in range(total_rectangle):
-        cv2.rectangle(frame, (hand_rect_one_y[i], hand_rect_one_x[i]),
-                      (hand_rect_two_y[i], hand_rect_two_x[i]),
-                      (0, 255, 0), 1)
-
-    return frame
-
 
 def draw_rect_V2(frame):
     """Draw calibration rectangles on frame"""
@@ -175,31 +149,8 @@ def hand_hsv_func(frame):
     
     return lower_skin, upper_skin
 
-def hist_masking(frame, skin_range):
-    """Apply HSV range mask (like commented code imageFiltering)"""
-    lower_skin, upper_skin = skin_range
-    
-    # Apply Gaussian blur to reduce noise
-    blur = cv2.GaussianBlur(frame, (5, 5), 0)
-    
-    # Convert to HSV
-    hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
-    
-    # Apply skin color mask
-    mask = cv2.inRange(hsv, lower_skin, upper_skin)
-    
-    # Reduce noise
-    filtered = cv2.GaussianBlur(mask, (3, 3), 0)
-    ret, thresh = cv2.threshold(filtered, 127, 255, 0)
-    thresh = cv2.GaussianBlur(thresh, (5, 5), 0)
-    
-    # Merge to 3 channels for display
-    thresh_3channel = cv2.merge((thresh, thresh, thresh))
-    
-    return cv2.bitwise_and(frame, thresh_3channel)
-
-
 def centroid(max_contour):
+    """Calculate centroid of contour using moments"""
     moment = cv2.moments(max_contour)
     if moment['m00'] != 0:
         cx = int(moment['m10'] / moment['m00'])
@@ -207,47 +158,6 @@ def centroid(max_contour):
         return cx, cy
     else:
         return None
-    
-
-
-def contours(hist_mask_image):
-    gray_hist_mask_image = cv2.cvtColor(hist_mask_image, cv2.COLOR_BGR2GRAY)
-    ret, thresh = cv2.threshold(gray_hist_mask_image, 0, 255, 0)
-    cont, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    return cont
-
-def manage_image_opr(frame, hand_hsv):
-    hist_mask_image = hist_masking(frame, hand_hsv)
-
-    hist_mask_image = cv2.erode(hist_mask_image, None, iterations=2)
-    hist_mask_image = cv2.dilate(hist_mask_image, None, iterations=2)
-
-    contour_list = contours(hist_mask_image)
-    
-    cnt_centroid = None
-    is_hand = False
-    validation_msg = "NO HAND"
-    
-    if len(contour_list) > 0:
-        max_cont = max(contour_list, key=cv2.contourArea)
-        
-        # Validate if it's actually a hand
-        is_hand, validation_msg = validate_hand_contour(max_cont, frame)
-        
-        if is_hand:
-            cnt_centroid = centroid(max_cont)
-            if cnt_centroid is not None:
-                cv2.circle(frame, cnt_centroid, 5, [255, 0, 255], -1)
-                # Display "HAND DETECTED" on frame
-                cv2.putText(frame, "HAND DETECTED", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        else:
-            # Not a hand - display warning
-            cv2.putText(frame, validation_msg, (10, 30), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-    
-    return cnt_centroid, is_hand
-
 
 def validate_hand_contour(contour, frame):
     """Validate if contour is actually a hand based on shape and position"""
@@ -276,8 +186,8 @@ def validate_hand_contour(contour, frame):
         return False, "NO HAND: Wrong shape"
     
     # 4. Position check (allow some margin from edges)
-    if x < CONFIG['EDGE_MARGIN'] or x + w > frame_width - CONFIG['EDGE_MARGIN']:
-        return False, "NO HAND: Edge position"
+    # if x < CONFIG['EDGE_MARGIN'] or x + w > frame_width - CONFIG['EDGE_MARGIN']:
+    #     return False, "NO HAND: Edge position"
     
     # 5. Centroid should be in reasonable vertical area
     M = cv2.moments(contour)
@@ -358,7 +268,33 @@ def main():
             # Create clean frame for mask (without text overlays)
             frame_copy_clean = crop_center(frame.copy())
             
-            hand_centroid_cropped, is_hand = manage_image_opr(frame_copy, hand_hsv)
+            # Get segmentation results
+            roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin)
+            
+            # Extract hand centroid and validation directly from segmentation
+            hand_centroid_cropped = None
+            is_hand = False
+            
+            if len(contours) > 0:
+                # Find largest contour
+                max_contour = max(contours, key=cv2.contourArea)
+                
+                # Validate if it's a hand
+                is_hand, validation_msg = validate_hand_contour(max_contour, frame_copy_clean)
+                
+                if is_hand:
+                    # Calculate centroid
+                    hand_centroid_cropped = centroid(max_contour)
+                    
+                    if hand_centroid_cropped is not None:
+                        # Draw purple centroid on frame_copy
+                        cv2.circle(frame_copy, hand_centroid_cropped, 5, [255, 0, 255], -1)
+                        cv2.putText(frame_copy, "HAND DETECTED", (10, 30), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                else:
+                    # Show validation message
+                    cv2.putText(frame_copy, validation_msg, (10, 30), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             # Calculate distance if hand is detected
             if hand_centroid_cropped is not None and is_hand:
@@ -390,11 +326,9 @@ def main():
                 center_x_full = center_x
                 center_y_full = center_y + 100
                 cv2.circle(frame, (center_x_full, center_y_full), 8, [0, 0, 255], -1)
-                # cv2.imshow("Hist mask image",hist_masking(frame_copy_clean, hand_hsv_func))
-                roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin) #getting the filtered image
-
-                #blank image which will be used to show the contours and defects
-                drawing = np.zeros(roi.shape,np.uint8)
+                
+                # Blank image for contour visualization
+                drawing = np.zeros(roi.shape, np.uint8)
                 
                 # Draw white centroid point on drawing window if hand detected
                 if hand_centroid_cropped is not None and is_hand:
