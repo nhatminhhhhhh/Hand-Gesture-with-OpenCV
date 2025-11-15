@@ -52,6 +52,16 @@ hand_rect_two_y = None
 lower_skin = None
 upper_skin = None
 
+# Calibration state tracking
+calibration_stage = 0  # 0: not started, 1: palm calibrated, 2: both calibrated
+palm_hsv_range = None  # Store palm HSV range
+back_hsv_range = None  # Store back of hand HSV range
+
+# Anti-flicker filter for finger detection
+from collections import deque
+finger_count_history = deque(maxlen=5)  # Store last 5 finger counts
+FINGER_COUNT_THRESHOLD = 3  # Minimum occurrences to confirm finger count change
+
 
 def rescale_frame(frame, wpercent=None, hpercent=None):
     """Rescale frame for display"""
@@ -96,9 +106,17 @@ def draw_rect_V2(frame):
 
 
 
-def hand_hsv_func(frame):
-    """Calculate HSV range from calibration box samples"""
-    global hand_rect_one_x, hand_rect_one_y, lower_skin, upper_skin
+def hand_hsv_func(frame, calibration_type="palm"):
+    """Calculate HSV range from calibration box samples
+    
+    Args:
+        frame: Input frame with calibration boxes
+        calibration_type: "palm" or "back" - which side of hand is being calibrated
+    
+    Returns:
+        tuple: (lower_hsv, upper_hsv) arrays
+    """
+    global hand_rect_one_x, hand_rect_one_y
 
     hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     rect_size = CONFIG['BOX_SIZE']
@@ -131,23 +149,91 @@ def hand_hsv_func(frame):
     v_offset_high = CONFIG['HSV_OFFSETS']['V_HIGH']
     
     # Create HSV range with individual offsets per channel
-    lower_skin = np.array([
+    lower = np.array([
         max(h_mean - h_offset_low, 0),
         max(s_mean - s_offset_low, 0),
         max(v_mean - v_offset_low, 0)
     ], dtype=np.uint8)
     
-    upper_skin = np.array([
+    upper = np.array([
         min(h_mean + h_offset_high, 179),
         min(s_mean + s_offset_high, 255),
         min(v_mean + v_offset_high, 255)
     ], dtype=np.uint8)
     
-    print(f"Skin calibration - H: {h_mean:.1f}, S: {s_mean:.1f}, V: {v_mean:.1f}")
-    print(f"Lower HSV: {lower_skin}")
-    print(f"Upper HSV: {upper_skin}")
+    print(f"\n{calibration_type.upper()} calibration:")
+    print(f"  H: {h_mean:.1f}, S: {s_mean:.1f}, V: {v_mean:.1f}")
+    print(f"  Lower HSV: {lower}")
+    print(f"  Upper HSV: {upper}")
     
-    return lower_skin, upper_skin
+    return lower, upper
+
+
+def combine_hsv_ranges(palm_range, back_range):
+    """Combine two HSV ranges to create a unified range that covers both
+    
+    Args:
+        palm_range: tuple of (lower_palm, upper_palm)
+        back_range: tuple of (lower_back, upper_back)
+    
+    Returns:
+        tuple: (combined_lower, combined_upper)
+    """
+    lower_palm, upper_palm = palm_range
+    lower_back, upper_back = back_range
+    
+    # Take minimum of lower bounds and maximum of upper bounds for each channel
+    combined_lower = np.array([
+        min(lower_palm[0], lower_back[0]),
+        min(lower_palm[1], lower_back[1]),
+        min(lower_palm[2], lower_back[2])
+    ], dtype=np.uint8)
+    
+    combined_upper = np.array([
+        max(upper_palm[0], upper_back[0]),
+        max(upper_palm[1], upper_back[1]),
+        max(upper_palm[2], upper_back[2])
+    ], dtype=np.uint8)
+    
+    print(f"\nCOMBINED HSV range:")
+    print(f"  Lower: {combined_lower}")
+    print(f"  Upper: {combined_upper}")
+    
+    return combined_lower, combined_upper
+
+
+def get_stable_finger_count(current_count):
+    """Apply temporal smoothing to reduce flicker in finger detection
+    
+    Args:
+        current_count: Current frame's detected finger count
+    
+    Returns:
+        int: Stabilized finger count
+    """
+    global finger_count_history
+    
+    # Add current count to history
+    finger_count_history.append(current_count)
+    
+    # If we don't have enough history yet, return current count
+    if len(finger_count_history) < 3:
+        return current_count
+    
+    # Use majority voting - return most common count in recent history
+    # This prevents rapid flickering between states
+    from collections import Counter
+    count_freq = Counter(finger_count_history)
+    most_common_count, frequency = count_freq.most_common(1)[0]
+    
+    # Only change to new count if it appears at least THRESHOLD times
+    if frequency >= FINGER_COUNT_THRESHOLD:
+        return most_common_count
+    else:
+        # Return the previous stable count (second most recent unique value)
+        if len(finger_count_history) >= 2:
+            return finger_count_history[-2]
+        return current_count
 
 def centroid(max_contour):
     """Calculate centroid of contour using moments"""
@@ -226,7 +312,7 @@ def imageFiltering(frame, lower_skin, upper_skin):
 
 
 def main():
-    global hand_hsv, lower_skin, upper_skin
+    global hand_hsv, lower_skin, upper_skin, calibration_stage, palm_hsv_range, back_hsv_range
     is_hand_created = False
     capture = cv2.VideoCapture(0)
 
@@ -238,16 +324,32 @@ def main():
         frame_copy = frame.copy()
         frame_copy = crop_center(frame_copy)
 
+        # Calibration key handler
         if pressed_key & 0xFF == ord('z'):
-            is_hand_created = True
-            hand_hsv = hand_hsv_func(frame_copy)
+            if calibration_stage == 0:
+                # First calibration - PALM
+                palm_hsv_range = hand_hsv_func(frame_copy, "palm")
+                calibration_stage = 1
+                print("\n>>> PALM calibrated! Now show BACK of hand and press 'z' again <<<\n")
+            elif calibration_stage == 1:
+                # Second calibration - BACK of hand
+                back_hsv_range = hand_hsv_func(frame_copy, "back")
+                calibration_stage = 2
+                # Combine both ranges
+                lower_skin, upper_skin = combine_hsv_ranges(palm_hsv_range, back_hsv_range)
+                is_hand_created = True
+                print("\n>>> Both sides calibrated! Hand detection active <<<\n")
         
+        # Reset calibration
         if pressed_key & 0xFF == ord('r'):
             is_hand_created = False
-            hand_hsv = None
+            calibration_stage = 0
+            palm_hsv_range = None
+            back_hsv_range = None
             lower_skin = None
             upper_skin = None
-            print("Recalibration mode - Press 'z' to calibrate skin color")
+            finger_count_history.clear()  # Clear anti-flicker history
+            print("\n>>> Recalibration mode - Press 'z' to calibrate PALM <<<\n")
 
         hand_centroid_cropped = None
         distance_x = 0
@@ -422,32 +524,70 @@ def main():
                         # This helps avoid false positives from shadows/gaps in FIST
                         min_one_finger_distance = CONFIG['MIN_ONE_FINGER_DIST']
                         
+                        # Determine raw finger count
+                        raw_finger_count = -1  # -1 = FIST, 0 = undetermined, 1-5 = finger count
+                        
                         if count_defects == 0:
                             # No defects detected
                             if highest_point_distance > min_one_finger_distance:
                                 # Highest point far from centroid = ONE finger extended
-                                cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)
-                                print("One finger detected - Distance:", highest_point_distance)
+                                raw_finger_count = 1
                             else:
                                 # Highest point close to centroid = FIST
-                                print("FIST detected - Distance:", highest_point_distance)
+                                raw_finger_count = -1
                         
                         elif count_defects >= 1:
-                            # Defects detected - check if it's real fingers or just shadow noise
-                            if highest_point_distance < min_one_finger_distance:
-                                # Highest point is close to centroid = FIST with shadow artifacts
-                                # Ignore the defects - it's actually a FIST
-                                print(f"FIST detected (shadow defects ignored) - HighDist: {highest_point_distance}, Defects: {count_defects}")
+                            # Advanced shadow vs real finger detection using multiple criteria:
+                            # 1. Area ratio - FIST has higher ratio (contour fills hull more)
+                            # 2. Highest point distance - Real fingers extend far from centroid
+                            # 3. Defect count - Shadows rarely create many deep defects
+                            
+                            # Thresholds for shadow detection
+                            SHADOW_AREA_RATIO_THRESHOLD = 75.0  # FIST typically > 75%
+                            SHADOW_DISTANCE_THRESHOLD = 100     # More conservative than ONE finger threshold
+                            
+                            # Check if it's a FIST with shadow artifacts
+                            is_likely_fist_shadow = (
+                                area_ratio > SHADOW_AREA_RATIO_THRESHOLD and 
+                                highest_point_distance < SHADOW_DISTANCE_THRESHOLD
+                            ) or (
+                                # Alternative: very high area ratio even with moderate distance
+                                area_ratio > 85.0 and 
+                                highest_point_distance < min_one_finger_distance
+                            )
+                            
+                            if is_likely_fist_shadow:
+                                # FIST with shadow artifacts
+                                raw_finger_count = -1
                             else:
-                                # Highest point is far = real extended fingers
-                                if count_defects == 1:
-                                    print("Two fingers detected")
-                                elif count_defects == 2:
-                                    print("Three fingers detected")
-                                elif count_defects == 3:
-                                    print("Four fingers detected")
-                                elif count_defects == 4:
-                                    print("Five fingers detected")
+                                # Real extended fingers detected
+                                raw_finger_count = count_defects + 1  # defects + 1 = finger count
+                        
+                        # Apply anti-flicker filter to stabilize detection
+                        stable_finger_count = get_stable_finger_count(raw_finger_count)
+                        
+                        # Display results based on stable count
+                        if stable_finger_count == -1:
+                            # FIST detected
+                            cv2.putText(drawing, "FIST detected", (10, 90),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                        elif stable_finger_count == 1:
+                            # ONE finger
+                            cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)
+                            cv2.putText(drawing, "One finger detected", (10, 90),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        elif stable_finger_count == 2:
+                            cv2.putText(drawing, "Two fingers detected", (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        elif stable_finger_count == 3:
+                            cv2.putText(drawing, "Three fingers detected", (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        elif stable_finger_count == 4:
+                            cv2.putText(drawing, "Four fingers detected", (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        elif stable_finger_count == 5:
+                            cv2.putText(drawing, "Five fingers detected", (10, 90),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
                             
                     except Exception as e:
                         pass
@@ -456,9 +596,15 @@ def main():
 
         else:
             frame_copy = rescale_frame(draw_rect_V2(frame_copy))  # Use V2 for cropped frame
-            # Show instruction
-            cv2.putText(frame_copy, "Press 'z' to calibrate skin color", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # Show instruction based on calibration stage
+            if calibration_stage == 0:
+                cv2.putText(frame_copy, "Press 'z' to calibrate PALM (front of hand)", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            elif calibration_stage == 1:
+                cv2.putText(frame_copy, "PALM calibrated! Press 'z' for BACK of hand", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                cv2.putText(frame_copy, ">>> FLIP YOUR HAND <<<", (10, 60),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         # cv2.imshow("Live Feed", rescale_frame(frame))
         # cv2.imshow("Live Feed", frame)
