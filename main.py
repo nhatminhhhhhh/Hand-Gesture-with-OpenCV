@@ -1,6 +1,8 @@
 import cv2
 import numpy as np
 import math
+import serial
+import time
 
 # ============================================================================
 # CONFIGURATION
@@ -29,7 +31,7 @@ CONFIG = {
     'ANGLE_RANGE': (25, 80),  # Degrees for valid finger valley
     'DEFECT_DEPTH_THRESHOLD': 10000,  # Minimum depth for valley
     'MIN_FINGERTIP_DIST': 70,  # Min distance from centroid to fingertip
-    'MIN_ONE_FINGER_DIST': 150,  # Min distance for ONE finger detection
+    'MIN_ONE_FINGER_DIST': 120,  # Min distance for ONE finger detection
     
     # Morphological operations
     'MORPH_KERNEL_SIZE': (4, 4),
@@ -202,12 +204,10 @@ def combine_hsv_ranges(palm_range, back_range):
     return combined_lower, combined_upper
 
 
-def get_stable_finger_count(current_count):
-    """Apply temporal smoothing to reduce flicker in finger detection
-    
+def get_stable_finger_count(current_count):  
+    """
     Args:
         current_count: Current frame's detected finger count
-    
     Returns:
         int: Stabilized finger count
     """
@@ -216,7 +216,7 @@ def get_stable_finger_count(current_count):
     # Add current count to history
     finger_count_history.append(current_count)
     
-    # If we don't have enough history yet, return current count
+    # If don't have enough history yet, return current count
     if len(finger_count_history) < 3:
         return current_count
     
@@ -311,21 +311,32 @@ def imageFiltering(frame, lower_skin, upper_skin):
     return roi, thresh, contours
 
 
+
 def main():
     global hand_hsv, lower_skin, upper_skin, calibration_stage, palm_hsv_range, back_hsv_range
     is_hand_created = False
     capture = cv2.VideoCapture(0)
 
+    # === SERIAL SETUP ===
+    # Change 'COM3' to your Arduino port (e.g., 'COM4', 'COM5', etc.)
+    # Baudrate must match Arduino Serial.begin()
+    try:
+        arduino = serial.Serial('COM10', 9600, timeout=1)
+        time.sleep(5)  # Wait for Arduino to reset
+        print("Serial connection to Arduino established.")
+    except Exception as e:
+        arduino = None
+        print(f"Could not connect to Arduino: {e}")
+
     while capture.isOpened():
         pressed_key = cv2.waitKey(1)
         _, frame = capture.read()
-        # height, width = frame.shape[:2]
         frame = cv2.flip(frame, 1)
         frame_copy = frame.copy()
-        frame_copy = crop_center(frame_copy)
+        # frame_copy = crop_center(frame_copy)
 
         # Calibration key handler
-        if pressed_key & 0xFF == ord('z'):
+        if pressed_key & 0xFF == ord('z') or pressed_key & 0xFF == ord('Z'):
             if calibration_stage == 0:
                 # First calibration - PALM
                 palm_hsv_range = hand_hsv_func(frame_copy, "palm")
@@ -369,14 +380,14 @@ def main():
         if is_hand_created:
             # Create clean frame for mask (without text overlays)
             frame_copy_clean = crop_center(frame.copy())
-            
+
             # Get segmentation results
             roi, thresh, contours = imageFiltering(frame_copy_clean, lower_skin, upper_skin)
-            
+
             # Extract hand centroid and validation directly from segmentation
             hand_centroid_cropped = None
             is_hand = False
-            
+
             if len(contours) > 0:
                 # Find largest contour
                 max_contour = max(contours, key=cv2.contourArea)
@@ -400,6 +411,14 @@ def main():
             
             # Calculate distance if hand is detected
             if hand_centroid_cropped is not None and is_hand:
+                # === SEND TO ARDUINO ===
+                if arduino:
+                    # Send as "X:val,Y:val\n"
+                    msg = f"X:{hand_centroid_cropped[0]},Y:{hand_centroid_cropped[1]}\n"
+                    try:
+                        arduino.write(msg.encode())
+                    except Exception as e:
+                        print(f"Serial send error: {e}")
                 # Distance from hand centroid to center (red point)
                 distance_x = hand_centroid_cropped[0] - center_x
                 distance_y = hand_centroid_cropped[1] - center_y
@@ -544,7 +563,7 @@ def main():
                             
                             # Thresholds for shadow detection
                             SHADOW_AREA_RATIO_THRESHOLD = 75.0  # FIST typically > 75%
-                            SHADOW_DISTANCE_THRESHOLD = 100     # More conservative than ONE finger threshold
+                            SHADOW_DISTANCE_THRESHOLD = 80     # More conservative than ONE finger threshold
                             
                             # Check if it's a FIST with shadow artifacts
                             is_likely_fist_shadow = (
@@ -571,29 +590,79 @@ def main():
                             # FIST detected
                             cv2.putText(drawing, "FIST detected", (10, 90),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+                            # Send 'S' to Arduino
+                            if arduino:
+                                try:
+                                    arduino.write(b'S\n')
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                         elif stable_finger_count == 1:
                             # ONE finger
                             cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)
                             cv2.putText(drawing, "One finger detected", (10, 90),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            # Calculate error_x and error_y (centroid to center of cropped frame)
+                            error_x = hand_centroid_cropped[0] - center_x
+                            error_y = hand_centroid_cropped[1] - center_y
+                            # Send 'F' and error values to Arduino
+                            if arduino:
+                                msg = f"F,{error_x},{error_y}\n"
+                                try:
+                                    arduino.write(msg.encode())
+                                    
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                         elif stable_finger_count == 2:
                             cv2.putText(drawing, "Two fingers detected", (10, 90),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            # Send 'T' to Arduino for two fingers
+                            if arduino:
+                                try:
+                                    arduino.write(b'M\n')
+                                    # time.sleep(0.05)  # Short delay
+                                    # response = arduino.readline().decode().strip()
+                                    # print(f"Arduino response for two fingers: '{response}'")
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                         elif stable_finger_count == 3:
                             cv2.putText(drawing, "Three fingers detected", (10, 90),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            # Send 'L' to Arduino for three fingers
+                            if arduino:
+                                try:
+                                    arduino.write(b'B\n')
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                         elif stable_finger_count == 4:
                             cv2.putText(drawing, "Four fingers detected", (10, 90),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                            # Send 'L' to Arduino for four fingers
+                            if arduino:
+                                try:
+                                    arduino.write(b'L\n')
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                         elif stable_finger_count == 5:
                             cv2.putText(drawing, "Five fingers detected", (10, 90),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-                            
+                            # Send 'R' to Arduino for five fingers
+                            if arduino:
+                                try:
+                                    arduino.write(b'R\n')
+                                except Exception as e:
+                                    print(f"Serial send error: {e}")
                     except Exception as e:
                         pass
                 cv2.imshow("thresh",thresh)
                 cv2.imshow("drawing",drawing)
 
+            else:
+                # No hand detected, send 'N' to Arduino
+                if arduino:
+                    try:
+                        arduino.write(b'N\n')
+                    except Exception as e:
+                        print(f"Serial send error: {e}")
         else:
             frame_copy = rescale_frame(draw_rect_V2(frame_copy))  # Use V2 for cropped frame
             # Show instruction based on calibration stage
