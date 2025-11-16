@@ -116,7 +116,7 @@ def hand_hsv_func(frame, calibration_type="palm"):
         calibration_type: "palm" or "back" - which side of hand is being calibrated
     
     Returns:
-        tuple: (lower_hsv, upper_hsv) arrays
+        (lower_hsv, upper_hsv) arrays
     """
     global hand_rect_one_x, hand_rect_one_y
 
@@ -221,7 +221,6 @@ def get_stable_finger_count(current_count):
         return current_count
     
     # Use majority voting - return most common count in recent history
-    # This prevents rapid flickering between states
     from collections import Counter
     count_freq = Counter(finger_count_history)
     most_common_count, frequency = count_freq.most_common(1)[0]
@@ -271,7 +270,7 @@ def validate_hand_contour(contour, frame):
     if aspect_ratio < CONFIG['MIN_ASPECT_RATIO']:
         return False, "NO HAND: Wrong shape"
     
-    # 4. Position check (allow some margin from edges)
+    # # 4. Position check (allow some margin from edges)
     # if x < CONFIG['EDGE_MARGIN'] or x + w > frame_width - CONFIG['EDGE_MARGIN']:
     #     return False, "NO HAND: Edge position"
     
@@ -306,7 +305,7 @@ def imageFiltering(frame, lower_skin, upper_skin):
     kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, CONFIG['MORPH_KERNEL_SIZE'])
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel2, iterations=CONFIG['MORPH_ITERATIONS'])
     # finding contours in the image. Will be used later in complex hull algorithm
-    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    _,contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     return roi, thresh, contours
 
@@ -316,12 +315,10 @@ def main():
     global hand_hsv, lower_skin, upper_skin, calibration_stage, palm_hsv_range, back_hsv_range
     is_hand_created = False
     capture = cv2.VideoCapture(0)
-
-    # === SERIAL SETUP ===
-    # Change 'COM3' to your Arduino port (e.g., 'COM4', 'COM5', etc.)
-    # Baudrate must match Arduino Serial.begin()
+    # Initialize serial communication with Arduino
     try:
-        arduino = serial.Serial('COM10', 9600, timeout=1)
+        # arduino = serial.Serial('COM10', 9600, timeout=1)
+        arduino = serial.Serial('/dev/ttyACM0', 9600, timeout=1)
         time.sleep(5)  # Wait for Arduino to reset
         print("Serial connection to Arduino established.")
     except Exception as e:
@@ -412,13 +409,13 @@ def main():
             # Calculate distance if hand is detected
             if hand_centroid_cropped is not None and is_hand:
                 # === SEND TO ARDUINO ===
-                if arduino:
-                    # Send as "X:val,Y:val\n"
-                    msg = f"X:{hand_centroid_cropped[0]},Y:{hand_centroid_cropped[1]}\n"
-                    try:
-                        arduino.write(msg.encode())
-                    except Exception as e:
-                        print(f"Serial send error: {e}")
+                # if arduino:
+                #     # Send as "X:val,Y:val\n"
+                #     msg = f"X:{hand_centroid_cropped[0]},Y:{hand_centroid_cropped[1]}\n"
+                #     try:
+                #         arduino.write(msg.encode())
+                #     except Exception as e:
+                #         print(f"Serial send error: {e}")
                 # Distance from hand centroid to center (red point)
                 distance_x = hand_centroid_cropped[0] - center_x
                 distance_y = hand_centroid_cropped[1] - center_y
@@ -437,16 +434,14 @@ def main():
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
                 
                 # Draw purple point on Live Feed frame (convert cropped coordinates to full frame)
-                # Cropped frame is [100:500, 0:300]
-                # So x stays same, but y needs +100 offset
                 cx_full = hand_centroid_cropped[0]  # X stays same (starts at 0)
-                cy_full = hand_centroid_cropped[1] + 100  # Y needs +100 offset
-                cv2.circle(frame, (cx_full, cy_full), 8, [255, 0, 255], -1)
+                cy_full = hand_centroid_cropped[1] + 100  # Y needs +100 offset cus of cropping
+                cv2.circle(frame_copy, (cx_full, cy_full), 8, [255, 0, 255], -1)
                 
                 # Also draw red center point on Live Feed
                 center_x_full = center_x
                 center_y_full = center_y + 100
-                cv2.circle(frame, (center_x_full, center_y_full), 8, [0, 0, 255], -1)
+                cv2.circle(frame_copy, (center_x_full, center_y_full), 8, [0, 0, 255], -1)
                 
                 # Blank image for contour visualization
                 drawing = np.zeros(roi.shape, np.uint8)
@@ -540,7 +535,6 @@ def main():
                                 cv2.line(drawing, start, end, [0, 100, 0], 2)
                         
                         # Distinguish FIST from real fingers using highest point distance
-                        # This helps avoid false positives from shadows/gaps in FIST
                         min_one_finger_distance = CONFIG['MIN_ONE_FINGER_DIST']
                         
                         # Determine raw finger count
@@ -556,7 +550,7 @@ def main():
                                 raw_finger_count = -1
                         
                         elif count_defects >= 1:
-                            # Advanced shadow vs real finger detection using multiple criteria:
+                            # Advanced shadow vs real finger detection using:
                             # 1. Area ratio - FIST has higher ratio (contour fills hull more)
                             # 2. Highest point distance - Real fingers extend far from centroid
                             # 3. Defect count - Shadows rarely create many deep defects
@@ -675,8 +669,6 @@ def main():
                 cv2.putText(frame_copy, ">>> FLIP YOUR HAND <<<", (10, 60),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        # cv2.imshow("Live Feed", rescale_frame(frame))
-        # cv2.imshow("Live Feed", frame)
         cv2.imshow("Cropped", frame_copy)
         
         if pressed_key == 27:

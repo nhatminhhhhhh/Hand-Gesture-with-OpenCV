@@ -64,7 +64,7 @@ void loop() {
   currentTime = millis();
   float deltaTime = (currentTime - previousTime) / 1000.0; // Convert to seconds
   //int cmd = 0;
-  if (Serial.available() > 0 && deltaTime >= 0.01) { // Check for new data every 1 second
+  if (Serial.available() > 0 && deltaTime >= 0.01) {
     previousTime = currentTime;
     String input = Serial.readStringUntil('\n');
     input.trim();
@@ -93,7 +93,6 @@ void loop() {
       cmd = 2;
     }
   } else {
-    // No data received, you can implement timeout behavior here if needed
     switch (cmd)
     {
     case 0:
@@ -104,7 +103,6 @@ void loop() {
       break;
     case 2:
       // follow_hand();
-
       break;
     case 3:
       Backward();
