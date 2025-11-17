@@ -52,7 +52,7 @@ void follow_hand(int error_x, int error_y) {
 void setup() {
   Serial.begin(9600);
   Motor_init();
-  Motor_setSpeed(255);
+  Motor_setSpeed(190);
   servo_x.attach(9, 500, 2400); // Attach servo to pin 9
   servo_y.attach(10, 500, 2400); // Attach servo to pin 10
   servo_x.write(150); // base position 150 degrees
@@ -103,6 +103,7 @@ void loop() {
       break;
     case 2:
       // follow_hand();
+      Motor_stop();
       break;
     case 3:
       Backward();

@@ -19,6 +19,12 @@ CONFIG = {
         'S_LOW': 50, 'S_HIGH': 80,
         'V_LOW': 60, 'V_HIGH': 80
     },
+    # YCrCb offsets for calibration
+    'YCRCB_OFFSETS': {
+        'Y_LOW': 20, 'Y_HIGH': 20,
+        'Cr_LOW': 20, 'Cr_HIGH': 20,
+        'Cb_LOW': 20, 'Cb_HIGH': 20
+    },
     
     # Hand validation thresholds
     'MIN_HAND_AREA': 1000,
@@ -58,6 +64,13 @@ upper_skin = None
 calibration_stage = 0  # 0: not started, 1: palm calibrated, 2: both calibrated
 palm_hsv_range = None  # Store palm HSV range
 back_hsv_range = None  # Store back of hand HSV range
+# YCrCb ranges
+palm_ycrcb_range = None
+back_ycrcb_range = None
+
+# Combined YCrCb skin range
+lower_skin_ycrcb = None
+upper_skin_ycrcb = None
 
 # Anti-flicker filter for finger detection
 from collections import deque
@@ -169,6 +182,77 @@ def hand_hsv_func(frame, calibration_type="palm"):
     print(f"  Upper HSV: {upper}")
     
     return lower, upper
+
+
+def hand_ycrcb_func(frame, calibration_type="palm"):
+    """Calculate YCrCb range from calibration box samples
+
+    Args:
+        frame: Input frame with calibration boxes
+        calibration_type: "palm" or "back"
+
+    Returns:
+        tuple: (lower_ycrcb, upper_ycrcb) arrays
+    """
+    global hand_rect_one_x, hand_rect_one_y
+
+    ycrcb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2YCrCb)
+    rect_size = CONFIG['BOX_SIZE']
+
+    y_values = []
+    cr_values = []
+    cb_values = []
+
+    for i in range(total_rectangle):
+        roi_sample = ycrcb_frame[hand_rect_one_x[i]:hand_rect_one_x[i] + rect_size,
+                                hand_rect_one_y[i]:hand_rect_one_y[i] + rect_size]
+        y_values.extend(roi_sample[:, :, 0].flatten())
+        cr_values.extend(roi_sample[:, :, 1].flatten())
+        cb_values.extend(roi_sample[:, :, 2].flatten())
+
+    y_mean = np.mean(y_values)
+    cr_mean = np.mean(cr_values)
+    cb_mean = np.mean(cb_values)
+
+    offs = CONFIG['YCRCB_OFFSETS']
+    lower = np.array([
+        max(y_mean - offs['Y_LOW'], 0),
+        max(cr_mean - offs['Cr_LOW'], 0),
+        max(cb_mean - offs['Cb_LOW'], 0)
+    ], dtype=np.uint8)
+
+    upper = np.array([
+        min(y_mean + offs['Y_HIGH'], 255),
+        min(cr_mean + offs['Cr_HIGH'], 255),
+        min(cb_mean + offs['Cb_HIGH'], 255)
+    ], dtype=np.uint8)
+
+    print(f"\n{calibration_type.upper()} YCrCb calibration:")
+    print(f"  Y: {y_mean:.1f}, Cr: {cr_mean:.1f}, Cb: {cb_mean:.1f}")
+    print(f"  Lower YCrCb: {lower}")
+    print(f"  Upper YCrCb: {upper}")
+
+    return lower, upper
+
+
+def combine_ycrcb_ranges(palm_range, back_range):
+    lower_palm, upper_palm = palm_range
+    lower_back, upper_back = back_range
+    combined_lower = np.array([
+        min(lower_palm[0], lower_back[0]),
+        min(lower_palm[1], lower_back[1]),
+        min(lower_palm[2], lower_back[2])
+    ], dtype=np.uint8)
+    combined_upper = np.array([
+        max(upper_palm[0], upper_back[0]),
+        max(upper_palm[1], upper_back[1]),
+        max(upper_palm[2], upper_back[2])
+    ], dtype=np.uint8)
+
+    print(f"\nCOMBINED YCrCb range:")
+    print(f"  Lower: {combined_lower}")
+    print(f"  Upper: {combined_upper}")
+    return combined_lower, combined_upper
 
 
 def combine_hsv_ranges(palm_range, back_range):
@@ -295,7 +379,19 @@ def imageFiltering(frame, lower_skin, upper_skin):
     hsv = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)
 
     # applying a mask which makes skin color white and others black
-    mask = cv2.inRange(hsv, lower_skin, upper_skin)
+    mask_hsv = cv2.inRange(hsv, lower_skin, upper_skin)
+
+    # If YCrCb ranges available, compute YCrCb mask and combine
+    mask_ycrcb = None
+    global lower_skin_ycrcb, upper_skin_ycrcb
+    if lower_skin_ycrcb is not None and upper_skin_ycrcb is not None:
+        ycrcb = cv2.cvtColor(blur, cv2.COLOR_BGR2YCrCb)
+        mask_ycrcb = cv2.inRange(ycrcb, lower_skin_ycrcb, upper_skin_ycrcb)
+
+    if mask_ycrcb is not None:
+        mask = cv2.bitwise_or(mask_hsv, mask_ycrcb)
+    else:
+        mask = mask_hsv
 
     kernel = np.ones((5, 5), np.uint8)
     # reducing noise
@@ -305,7 +401,7 @@ def imageFiltering(frame, lower_skin, upper_skin):
     kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, CONFIG['MORPH_KERNEL_SIZE'])
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel2, iterations=CONFIG['MORPH_ITERATIONS'])
     # finding contours in the image. Will be used later in complex hull algorithm
-    _,contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    contours, hierarchy = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
     return roi, thresh, contours
 
@@ -330,21 +426,24 @@ def main():
         _, frame = capture.read()
         frame = cv2.flip(frame, 1)
         frame_copy = frame.copy()
-        # frame_copy = crop_center(frame_copy)
+        frame_copy = crop_center(frame_copy)
 
         # Calibration key handler
         if pressed_key & 0xFF == ord('z') or pressed_key & 0xFF == ord('Z'):
             if calibration_stage == 0:
                 # First calibration - PALM
                 palm_hsv_range = hand_hsv_func(frame_copy, "palm")
+                palm_ycrcb_range = hand_ycrcb_func(frame_copy, "palm")
                 calibration_stage = 1
                 print("\n>>> PALM calibrated! Now show BACK of hand and press 'z' again <<<\n")
             elif calibration_stage == 1:
                 # Second calibration - BACK of hand
                 back_hsv_range = hand_hsv_func(frame_copy, "back")
+                back_ycrcb_range = hand_ycrcb_func(frame_copy, "back")
                 calibration_stage = 2
-                # Combine both ranges
+                # Combine both ranges for HSV and YCrCb
                 lower_skin, upper_skin = combine_hsv_ranges(palm_hsv_range, back_hsv_range)
+                lower_skin_ycrcb, upper_skin_ycrcb = combine_ycrcb_ranges(palm_ycrcb_range, back_ycrcb_range)
                 is_hand_created = True
                 print("\n>>> Both sides calibrated! Hand detection active <<<\n")
         
@@ -416,10 +515,6 @@ def main():
                 #         arduino.write(msg.encode())
                 #     except Exception as e:
                 #         print(f"Serial send error: {e}")
-                # Distance from hand centroid to center (red point)
-                distance_x = hand_centroid_cropped[0] - center_x
-                distance_y = hand_centroid_cropped[1] - center_y
-                distance_total = int(np.sqrt(distance_x**2 + distance_y**2))
                 
                 # Draw line connecting purple point to red center
                 cv2.line(frame_copy, hand_centroid_cropped, (center_x, center_y), 
@@ -432,16 +527,6 @@ def main():
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
                 cv2.putText(frame_copy, f"Distance: {distance_total}", (10, cropped_height - 20),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
-                
-                # Draw purple point on Live Feed frame (convert cropped coordinates to full frame)
-                cx_full = hand_centroid_cropped[0]  # X stays same (starts at 0)
-                cy_full = hand_centroid_cropped[1] + 100  # Y needs +100 offset cus of cropping
-                cv2.circle(frame_copy, (cx_full, cy_full), 8, [255, 0, 255], -1)
-                
-                # Also draw red center point on Live Feed
-                center_x_full = center_x
-                center_y_full = center_y + 100
-                cv2.circle(frame_copy, (center_x_full, center_y_full), 8, [0, 0, 255], -1)
                 
                 # Blank image for contour visualization
                 drawing = np.zeros(roi.shape, np.uint8)
@@ -475,12 +560,11 @@ def main():
                         )
                             # Draw the highest point for visualization
                         cv2.circle(drawing, highest_point, 5, [0, 255, 255], -1)  # Yellow dot
-                            # cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)  # Cyan line
+                        cv2.line(drawing, hand_centroid_cropped, highest_point, [255, 255, 0], 1)  # Cyan line
                         
                         # Within range or not calibrated yet - proceed with detection
                         # Draw contours
                         cv2.drawContours(drawing, [contour], -1, (0, 255, 0), 0)
-                        # cv2.drawContours(drawing, [hull], -1, (255, 255, 255), 0)
                         
                         # Display current area
                         cv2.putText(drawing, f"Area: {int(current_hull_area)}", (10, 30),
