@@ -19,12 +19,12 @@ Cửa sổ "drawing" sẽ hiển thị viền contour và convex hull của ản
         'V_LOW': (offset), 'V_HIGH': (offset)
     }, | thông số để hiệu chỉnh khi lấy mẫu bằng HSV
 - 'YCRCB_OFFSETS': {
-        'Y_LOW': 20, 'Y_HIGH': 20,
-        'Cr_LOW': 20, 'Cr_HIGH': 20,
-        'Cb_LOW': 20, 'Cb_HIGH': 20
-    }, | thông số để hiệu chỉnh khi lấy mẫu bằng YCrCB
+  'Y_LOW': 20, 'Y_HIGH': 20,
+  'Cr_LOW': 20, 'Cr_HIGH': 20,
+  'Cb_LOW': 20, 'Cb_HIGH': 20
+  }, | thông số để hiệu chỉnh khi lấy mẫu bằng YCrCB
 - 'MIN_HAND_AREA': 1000,
-  'MAX_HAND_AREA_RATIO': 0.8,  
+  'MAX_HAND_AREA_RATIO': 0.8,
   'MIN_ASPECT_RATIO': 0.5,
   'EDGE_MARGIN': 5,
   'MIN_CENTROID_HEIGHT_RATIO': 0.1, | thông số cho việc xác định có phải là bàn tay hay không
@@ -34,4 +34,5 @@ Cửa sổ "drawing" sẽ hiển thị viền contour và convex hull của ản
   'MIN_ONE_FINGER_DIST': 120,  # Min distance for ONE finger detection
 - 'MORPH_KERNEL_SIZE': (4, 4),
   'MORPH_ITERATIONS': 2, | thông số cho việc open của thresh bàn tay (giảm nhiễu)
+
 
