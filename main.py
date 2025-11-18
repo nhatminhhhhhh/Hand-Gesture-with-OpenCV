@@ -72,6 +72,11 @@ back_ycrcb_range = None
 lower_skin_ycrcb = None
 upper_skin_ycrcb = None
 
+# CamShift tracking globals
+tracking_hist = None
+tracking_window = None
+tracking_active = False
+
 # Anti-flicker filter for finger detection
 from collections import deque
 finger_count_history = deque(maxlen=5)  # Store last 5 finger counts
@@ -446,6 +451,19 @@ def main():
                 lower_skin_ycrcb, upper_skin_ycrcb = combine_ycrcb_ranges(palm_ycrcb_range, back_ycrcb_range)
                 is_hand_created = True
                 print("\n>>> Both sides calibrated! Hand detection active <<<\n")
+                # Build tracking histogram (HSV H-channel) using combined mask
+                try:
+                    frame_for_calib = frame_copy.copy()
+                    _, calib_thresh, _ = imageFiltering(frame_for_calib, lower_skin, upper_skin)
+                    hsv_for_hist = cv2.cvtColor(frame_for_calib, cv2.COLOR_BGR2HSV)
+                    hist = cv2.calcHist([hsv_for_hist], [0], calib_thresh, [180], [0, 180])
+                    cv2.normalize(hist, hist, 0, 255, cv2.NORM_MINMAX)
+                    tracking_hist = hist
+                    tracking_active = False
+                    tracking_window = None
+                    print("Tracking histogram created.")
+                except Exception as e:
+                    print(f"Failed to create tracking histogram: {e}")
         
         # Reset calibration
         if pressed_key & 0xFF == ord('r'):
@@ -507,6 +525,45 @@ def main():
             
             # Calculate distance if hand is detected
             if hand_centroid_cropped is not None and is_hand:
+                # --- CamShift tracking using backprojection ---
+                if tracking_hist is not None:
+                    try:
+                        hsv_bp = cv2.cvtColor(frame_copy_clean, cv2.COLOR_BGR2HSV)
+                        backproj = cv2.calcBackProject([hsv_bp], [0], tracking_hist, [0, 180], 1)
+                        # Optionally smooth backproj to reduce noise
+                        backproj = cv2.GaussianBlur(backproj, (5,5), 0)
+                        # Show backprojection for debugging
+                        cv2.imshow("Backproj", backproj)
+
+                        # Initialize tracking window from largest contour if not active
+                        if not tracking_active:
+                            x, y, w, h = cv2.boundingRect(max_contour)
+                            tracking_window = (x, y, max(2, w), max(2, h))
+                            tracking_active = True
+                        # Run CamShift
+                        term_crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 1)
+                        ret, tracking_window = cv2.CamShift(backproj, tracking_window, term_crit)
+                        pts = cv2.boxPoints(ret)
+                        pts = np.intp(pts)
+                        # Draw rotated box (CamShift result) - thicker for visibility
+                        cv2.polylines(frame_copy, [pts], True, (0, 255, 0), 3)
+                        # Also draw simple bounding rectangle and center for clarity
+                        rx, ry, rw, rh = cv2.boundingRect(pts)
+                        cv2.rectangle(frame_copy, (rx, ry), (rx + rw, ry + rh), (255, 0, 0), 3)
+                        # Draw center point
+                        cx = rx + rw // 2
+                        cy = ry + rh // 2
+                        cv2.circle(frame_copy, (cx, cy), 6, (0, 0, 255), -1)
+                        cv2.putText(frame_copy, "TRACKING", (rx, ry - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0), 2)
+                        # Print tracking info
+                        print(f"CamShift ret: center=({ret[0][0]:.1f},{ret[0][1]:.1f}) size=({ret[1][0]:.1f},{ret[1][1]:.1f}) angle={ret[2]:.1f}")
+                        print(f"tracking_window: {tracking_window}")
+                    except Exception as e:
+                        print(f"CamShift/backproj error: {e}")
+                else:
+                    # No histogram yet: show empty backproj window for visibility
+                    blank = np.zeros((cropped_height, cropped_width), dtype=np.uint8)
+                    cv2.imshow("Backproj", blank)
                 # === SEND TO ARDUINO ===
                 # if arduino:
                 #     # Send as "X:val,Y:val\n"
